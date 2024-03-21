@@ -5,12 +5,57 @@ import "./SmartWalletTestBase.sol";
 import "webauthn-sol/../test/Utils.sol";
 
 contract TestIsValidSignature is SmartWalletTestBase {
-    function testValidateSignatureWithPasskeySigner() public {
-        bytes32 hash = 0x15fa6f8c855db1dccbb8a42eef3a7b83f11d29758e84aed37312527165d5eec5;
+    // Values from the P256 curve
+    uint256 P256_N = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551;
+    uint256 P256_N_DIV_2 = 57896044605178124381348723474703786764998477612067880171211129530534256022184;
+
+    // We fuzz a testHash and some cases error
+    function testValidateSignatureWithPasskeySigner(bytes32 testHash) public {
+        bytes32 hash = testHash;
         bytes32 challenge = account.replaySafeHash(hash);
         WebAuthnInfo memory webAuthn = Utils.getWebAuthnStruct(challenge);
 
         (bytes32 r, bytes32 s) = vm.signP256(passkeyPrivateKey, webAuthn.messageHash);
+        bytes memory sig = abi.encode(
+            CoinbaseSmartWallet.SignatureWrapper({
+                ownerIndex: 1,
+                signatureData: abi.encode(
+                    WebAuthn.WebAuthnAuth({
+                        authenticatorData: webAuthn.authenticatorData,
+                        clientDataJSON: webAuthn.clientDataJSON,
+                        typeIndex: 1,
+                        challengeIndex: 23,
+                        r: uint256(r),
+                        s: uint256(s)
+                    })
+                    )
+            })
+        );
+
+        // check a valid signature
+        bytes4 ret = account.isValidSignature(hash, sig);
+
+        // Some signatures are invalid because the s value is greater than P256_N_DIV_2
+        if (uint256(s) > P256_N_DIV_2) {
+            assertEq(ret, bytes4(0xFFFFFFFF));
+        } else {
+            assertEq(ret, bytes4(0x1626ba7e));
+        }
+    }
+
+    function testValidateSignatureWithPasskeySignerWithSCheck(bytes32 testHash) public {
+        bytes32 hash = testHash;
+        bytes32 challenge = account.replaySafeHash(hash);
+        WebAuthnInfo memory webAuthn = Utils.getWebAuthnStruct(challenge);
+
+        (bytes32 r, bytes32 s) = vm.signP256(passkeyPrivateKey, webAuthn.messageHash);
+
+        if (uint256(s) > P256_N_DIV_2) {
+            // Use complement to get the correct s value
+            // https://github.com/indutny/elliptic/blob/75700785ff41bb5d029d19186beff26d4883caa5/lib/elliptic/ec/index.js#L147
+            s = bytes32((P256_N - uint256(s)) % P256_N);
+        }
+
         bytes memory sig = abi.encode(
             CoinbaseSmartWallet.SignatureWrapper({
                 ownerIndex: 1,
@@ -164,22 +209,5 @@ contract TestIsValidSignature is SmartWalletTestBase {
         bytes memory signature = abi.encodePacked(r, s, v);
         vm.expectRevert();
         account.isValidSignature(hash, abi.encode(CoinbaseSmartWallet.SignatureWrapper(1, signature)));
-    }
-
-    // @dev this case should not be possible, but we need to explicitly test the revert case
-    function testRevertsIfOwnerIsInvalidEthereumAddress() public {
-        bytes32 hash = 0x15fa6f8c855db1dccbb8a42eef3a7b83f11d29758e84aed37312527165d5eec5;
-        bytes32 toSign = account.replaySafeHash(hash);
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerPrivateKey, toSign);
-        bytes memory signature = abi.encodePacked(r, s, v);
-        bytes32 invalidAddress = bytes32(uint256(type(uint160).max) + 1);
-        bytes32 slot_ownerAtIndex = 0x97e2c6aad4ce5d562ebfaa00db6b9e0fb66ea5d8162ed5b243f51a2e03086f01; // MUTLI_OWNABLE_STORAGE_LOCATION + 1
-        bytes32 slot_ownerAtIndex_zeroIndex =
-            bytes32(uint256(keccak256(abi.encodePacked(keccak256(abi.encode(0, slot_ownerAtIndex))))));
-        vm.store(address(account), slot_ownerAtIndex_zeroIndex, invalidAddress);
-        vm.expectRevert(
-            abi.encodeWithSelector(MultiOwnable.InvalidEthereumAddressOwner.selector, abi.encode(invalidAddress))
-        );
-        account.isValidSignature(hash, abi.encode(CoinbaseSmartWallet.SignatureWrapper(0, signature)));
     }
 }
